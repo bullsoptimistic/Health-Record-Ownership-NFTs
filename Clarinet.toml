@@ -1,0 +1,30 @@
+[project]
+name = 'Health-Record-Ownership-NFTs'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.Health-Record-Ownership-NFTs]
+path = 'contracts/Health-Record-Ownership-NFTs.clar'
+clarity_version = 3
+epoch = 3.1
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
+
+[repl.remote_data]
+enabled = false
+api_url = 'https://api.hiro.so'
+[contracts.nft-trait]
+path = "contracts/nft-trait.clar"
+depends_on = []
+
+[contracts.health-record-nft]
+path = "contracts/Health-Record-Ownership-NFTs.clar"
+depends_on = ["nft-trait"]
