@@ -1,65 +1,50 @@
-(use-trait nft-trait .nft-trait.nft-trait)
-
 (define-non-fungible-token health-record uint)
-
 (define-data-var last-token-id uint u0)
+(define-data-var last-audit-id uint u0)
 
 (define-map token-count
-    
-principal
-    
-uint
-
+    principal
+    uint
 )
 
 (define-map record-metadata
-    
-uint
-    
-{
-    
-    patient: principal,
-    
-    record-hash: (buff 32),
-    
-    created-at: uint,
-    
-    is-active: bool,
-    
-}
-
+    uint
+    {
+        patient: principal,
+        record-hash: (buff 32),
+        created-at: uint,
+        is-active: bool,
+    }
 )
 
 (define-map access-permissions
-    
-{
-    
-    token-id: uint,
-    
-    accessor: principal,
-    
-}
-    
-{
-    
-    granted-by: principal,
-    
-    granted-at: uint,
-    
-    expires-at: (optional uint),
-    
-    access-type: (string-ascii 20),
-    
-}
-
+    {
+        token-id: uint,
+        accessor: principal,
+    }
+    {
+        granted-by: principal,
+        granted-at: uint,
+        expires-at: (optional uint),
+        access-type: (string-ascii 20),
+    }
 )
 
 (define-map authorized-providers
-    
-principal
-    
-bool
+    principal
+    bool
+)
 
+(define-map audit-log
+    uint
+    {
+        token-id: uint,
+        action: (string-ascii 20),
+        actor: principal,
+        target: (optional principal),
+        timestamp: uint,
+        result: bool,
+    }
 )
 
 (define-data-var contract-owner principal tx-sender)
@@ -129,20 +114,56 @@ bool
     (default-to false (map-get? authorized-providers provider))
 )
 
+(define-read-only (get-audit-log (audit-id uint))
+    (map-get? audit-log audit-id)
+)
+
+(define-read-only (get-last-audit-id)
+    (ok (var-get last-audit-id))
+)
+
+(define-private (log-audit-event
+        (token-id uint)
+        (action (string-ascii 20))
+        (target (optional principal))
+        (result bool)
+    )
+    (let ((audit-id (+ (var-get last-audit-id) u1)))
+        (map-set audit-log audit-id {
+            token-id: token-id,
+            action: action,
+            actor: tx-sender,
+            target: target,
+            timestamp: burn-block-height,
+            result: result,
+        })
+        (var-set last-audit-id audit-id)
+        audit-id
+    )
+)
+
 (define-public (mint-health-record (record-hash (buff 32)))
     (let ((token-id (+ (var-get last-token-id) u1)))
-        (try! (nft-mint? health-record token-id tx-sender))
-        (map-set record-metadata token-id {
-            patient: tx-sender,
-            record-hash: record-hash,
-            created-at: burn-block-height,
-            is-active: true,
-        })
-        (map-set token-count tx-sender
-            (+ (default-to u0 (map-get? token-count tx-sender)) u1)
+        (match (nft-mint? health-record token-id tx-sender)
+            success (begin
+                (map-set record-metadata token-id {
+                    patient: tx-sender,
+                    record-hash: record-hash,
+                    created-at: burn-block-height,
+                    is-active: true,
+                })
+                (map-set token-count tx-sender
+                    (+ (default-to u0 (map-get? token-count tx-sender)) u1)
+                )
+                (var-set last-token-id token-id)
+                (log-audit-event token-id "mint" none true)
+                (ok token-id)
+            )
+            error (begin
+                (log-audit-event token-id "mint" none false)
+                (err error)
+            )
         )
-        (var-set last-token-id token-id)
-        (ok token-id)
     )
 )
 
@@ -169,6 +190,7 @@ bool
             expires-at: expires-at,
             access-type: access-type,
         })
+        (log-audit-event token-id "grant-access" (some accessor) true)
         (ok true)
     )
 )
@@ -183,6 +205,7 @@ bool
             token-id: token-id,
             accessor: accessor,
         })
+        (log-audit-event token-id "revoke-access" (some accessor) true)
         (ok true)
     )
 )
@@ -191,13 +214,19 @@ bool
     (let (
             (record-data (unwrap! (map-get? record-metadata token-id) err-token-not-found))
             (token-owner (unwrap! (nft-get-owner? health-record token-id) err-token-not-found))
+            (has-access (or (is-eq tx-sender token-owner) (has-valid-access token-id tx-sender)))
         )
         (asserts! (get is-active record-data) err-record-inactive)
-        (asserts!
-            (or (is-eq tx-sender token-owner) (has-valid-access token-id tx-sender))
-            err-unauthorized-access
+        (if has-access
+            (begin
+                (log-audit-event token-id "access" none true)
+                (ok (get record-hash record-data))
+            )
+            (begin
+                (log-audit-event token-id "access" none false)
+                err-unauthorized-access
+            )
         )
-        (ok (get record-hash record-data))
     )
 )
 
@@ -208,7 +237,16 @@ bool
     )
     (begin
         (asserts! (is-eq tx-sender sender) err-not-token-owner)
-        (nft-transfer? health-record token-id sender recipient)
+        (match (nft-transfer? health-record token-id sender recipient)
+            success (begin
+                (log-audit-event token-id "transfer" (some recipient) true)
+                (ok success)
+            )
+            error (begin
+                (log-audit-event token-id "transfer" (some recipient) false)
+                (err error)
+            )
+        )
     )
 )
 
