@@ -47,6 +47,31 @@
     }
 )
 
+(define-map emergency-contacts
+    {
+        patient: principal,
+        emergency-contact: principal,
+    }
+    {
+        relationship: (string-ascii 50),
+        authorized-at: uint,
+        is-active: bool,
+    }
+)
+
+(define-map emergency-access-log
+    uint
+    {
+        patient: principal,
+        emergency-contact: principal,
+        token-id: uint,
+        accessed-at: uint,
+        reason: (string-ascii 100),
+    }
+)
+
+(define-data-var last-emergency-access-id uint u0)
+
 (define-data-var contract-owner principal tx-sender)
 
 (define-constant err-owner-only (err u100))
@@ -56,6 +81,7 @@
 (define-constant err-invalid-provider (err u104))
 (define-constant err-access-expired (err u105))
 (define-constant err-record-inactive (err u106))
+(define-constant err-not-emergency-contact (err u107))
 
 (define-read-only (get-last-token-id)
     (ok (var-get last-token-id))
@@ -120,6 +146,39 @@
 
 (define-read-only (get-last-audit-id)
     (ok (var-get last-audit-id))
+)
+
+(define-read-only (get-emergency-contact
+        (patient principal)
+        (emergency-contact principal)
+    )
+    (map-get? emergency-contacts {
+        patient: patient,
+        emergency-contact: emergency-contact,
+    })
+)
+
+(define-read-only (is-emergency-contact
+        (patient principal)
+        (emergency-contact principal)
+    )
+    (let ((contact-data (map-get? emergency-contacts {
+            patient: patient,
+            emergency-contact: emergency-contact,
+        })))
+        (match contact-data
+            data (get is-active data)
+            false
+        )
+    )
+)
+
+(define-read-only (get-emergency-access-log (access-id uint))
+    (map-get? emergency-access-log access-id)
+)
+
+(define-read-only (get-last-emergency-access-id)
+    (ok (var-get last-emergency-access-id))
 )
 
 (define-private (log-audit-event
@@ -271,5 +330,59 @@
         (asserts! (is-eq tx-sender (var-get contract-owner)) err-owner-only)
         (var-set contract-owner new-owner)
         (ok true)
+    )
+)
+
+(define-public (designate-emergency-contact
+        (emergency-contact principal)
+        (relationship (string-ascii 50))
+    )
+    (begin
+        (map-set emergency-contacts {
+            patient: tx-sender,
+            emergency-contact: emergency-contact,
+        } {
+            relationship: relationship,
+            authorized-at: burn-block-height,
+            is-active: true,
+        })
+        (ok true)
+    )
+)
+
+(define-public (revoke-emergency-contact (emergency-contact principal))
+    (begin
+        (map-delete emergency-contacts {
+            patient: tx-sender,
+            emergency-contact: emergency-contact,
+        })
+        (ok true)
+    )
+)
+
+(define-public (emergency-access-record
+        (token-id uint)
+        (patient principal)
+        (reason (string-ascii 100))
+    )
+    (let (
+            (record-data (unwrap! (map-get? record-metadata token-id) err-token-not-found))
+            (token-owner (unwrap! (nft-get-owner? health-record token-id) err-token-not-found))
+            (is-emergency-authorized (is-emergency-contact patient tx-sender))
+            (emergency-access-id (+ (var-get last-emergency-access-id) u1))
+        )
+        (asserts! (is-eq token-owner patient) err-not-token-owner)
+        (asserts! (get is-active record-data) err-record-inactive)
+        (asserts! is-emergency-authorized err-not-emergency-contact)
+        (map-set emergency-access-log emergency-access-id {
+            patient: patient,
+            emergency-contact: tx-sender,
+            token-id: token-id,
+            accessed-at: burn-block-height,
+            reason: reason,
+        })
+        (var-set last-emergency-access-id emergency-access-id)
+        (log-audit-event token-id "emergency-access" (some patient) true)
+        (ok (get record-hash record-data))
     )
 )
