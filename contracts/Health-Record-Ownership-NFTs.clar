@@ -71,6 +71,23 @@
 )
 
 (define-data-var last-emergency-access-id uint u0)
+(define-data-var last-inheritance-id uint u0)
+
+(define-map inheritance-plans
+    uint
+    {
+        token-id: uint,
+        beneficiary: principal,
+        lock-period: uint,
+        last-activity: uint,
+        is-active: bool,
+    }
+)
+
+(define-map patient-activity
+    principal
+    uint
+)
 
 (define-data-var contract-owner principal tx-sender)
 
@@ -82,6 +99,9 @@
 (define-constant err-access-expired (err u105))
 (define-constant err-record-inactive (err u106))
 (define-constant err-not-emergency-contact (err u107))
+(define-constant err-inheritance-locked (err u108))
+(define-constant err-not-beneficiary (err u109))
+(define-constant err-inheritance-not-found (err u110))
 
 (define-read-only (get-last-token-id)
     (ok (var-get last-token-id))
@@ -179,6 +199,30 @@
 
 (define-read-only (get-last-emergency-access-id)
     (ok (var-get last-emergency-access-id))
+)
+
+(define-read-only (get-inheritance-plan (inheritance-id uint))
+    (map-get? inheritance-plans inheritance-id)
+)
+
+(define-read-only (get-last-inheritance-id)
+    (ok (var-get last-inheritance-id))
+)
+
+(define-read-only (get-patient-activity (patient principal))
+    (default-to u0 (map-get? patient-activity patient))
+)
+
+(define-read-only (is-inheritance-claimable (inheritance-id uint))
+    (match (map-get? inheritance-plans inheritance-id)
+        plan (and
+            (get is-active plan)
+            (> burn-block-height
+                (+ (get last-activity plan) (get lock-period plan))
+            )
+        )
+        false
+    )
 )
 
 (define-private (log-audit-event
@@ -384,5 +428,103 @@
         (var-set last-emergency-access-id emergency-access-id)
         (log-audit-event token-id "emergency-access" (some patient) true)
         (ok (get record-hash record-data))
+    )
+)
+
+(define-private (update-patient-activity (patient principal))
+    (map-set patient-activity patient burn-block-height)
+)
+
+(define-public (create-inheritance-plan
+        (token-id uint)
+        (beneficiary principal)
+        (lock-period uint)
+    )
+    (let (
+            (token-owner (unwrap! (nft-get-owner? health-record token-id) err-token-not-found))
+            (inheritance-id (+ (var-get last-inheritance-id) u1))
+        )
+        (asserts! (is-eq token-owner tx-sender) err-not-token-owner)
+        (map-set inheritance-plans inheritance-id {
+            token-id: token-id,
+            beneficiary: beneficiary,
+            lock-period: lock-period,
+            last-activity: burn-block-height,
+            is-active: true,
+        })
+        (var-set last-inheritance-id inheritance-id)
+        (update-patient-activity tx-sender)
+        (log-audit-event token-id "inheritance-plan" (some beneficiary) true)
+        (ok inheritance-id)
+    )
+)
+
+(define-public (claim-inheritance (inheritance-id uint))
+    (let (
+            (plan (unwrap! (map-get? inheritance-plans inheritance-id)
+                err-inheritance-not-found
+            ))
+            (token-id (get token-id plan))
+            (token-owner (unwrap! (nft-get-owner? health-record token-id) err-token-not-found))
+        )
+        (asserts! (is-eq tx-sender (get beneficiary plan)) err-not-beneficiary)
+        (asserts! (get is-active plan) err-inheritance-not-found)
+        (asserts! (is-inheritance-claimable inheritance-id)
+            err-inheritance-locked
+        )
+        (match (nft-transfer? health-record token-id token-owner tx-sender)
+            success (begin
+                (map-set inheritance-plans inheritance-id
+                    (merge plan { is-active: false })
+                )
+                (log-audit-event token-id "inheritance-claim" (some token-owner)
+                    true
+                )
+                (ok token-id)
+            )
+            error (begin
+                (log-audit-event token-id "inheritance-claim" (some token-owner)
+                    false
+                )
+                (err error)
+            )
+        )
+    )
+)
+
+(define-public (update-inheritance-activity (inheritance-id uint))
+    (let (
+            (plan (unwrap! (map-get? inheritance-plans inheritance-id)
+                err-inheritance-not-found
+            ))
+            (token-owner (unwrap! (nft-get-owner? health-record (get token-id plan))
+                err-token-not-found
+            ))
+        )
+        (asserts! (is-eq token-owner tx-sender) err-not-token-owner)
+        (asserts! (get is-active plan) err-inheritance-not-found)
+        (map-set inheritance-plans inheritance-id
+            (merge plan { last-activity: burn-block-height })
+        )
+        (update-patient-activity tx-sender)
+        (ok true)
+    )
+)
+
+(define-public (cancel-inheritance-plan (inheritance-id uint))
+    (let (
+            (plan (unwrap! (map-get? inheritance-plans inheritance-id)
+                err-inheritance-not-found
+            ))
+            (token-owner (unwrap! (nft-get-owner? health-record (get token-id plan))
+                err-token-not-found
+            ))
+        )
+        (asserts! (is-eq token-owner tx-sender) err-not-token-owner)
+        (map-set inheritance-plans inheritance-id
+            (merge plan { is-active: false })
+        )
+        (log-audit-event (get token-id plan) "inheritance-cancel" none true)
+        (ok true)
     )
 )
