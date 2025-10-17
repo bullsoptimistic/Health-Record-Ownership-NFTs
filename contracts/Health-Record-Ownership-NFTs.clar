@@ -72,6 +72,7 @@
 
 (define-data-var last-emergency-access-id uint u0)
 (define-data-var last-inheritance-id uint u0)
+(define-data-var last-analytics-id uint u0)
 
 (define-map inheritance-plans
     uint
@@ -89,6 +90,44 @@
     uint
 )
 
+;; Health Analytics Feature Maps
+(define-map health-analytics-records
+    uint
+    {
+        patient: principal,
+        metric-type: (string-ascii 50),
+        metric-value: uint,
+        unit: (string-ascii 20),
+        recorded-at: uint,
+        is-verified: bool,
+        provider: (optional principal),
+        metadata: (string-ascii 200),
+    }
+)
+
+(define-map patient-analytics-summary
+    principal
+    {
+        total-records: uint,
+        last-updated: uint,
+        avg-metric-count-per-month: uint,
+        verified-records: uint,
+    }
+)
+
+(define-map analytics-permissions
+    {
+        patient: principal,
+        analyzer: principal,
+    }
+    {
+        granted-at: uint,
+        expires-at: (optional uint),
+        permission-level: (string-ascii 20),
+        is-active: bool,
+    }
+)
+
 (define-data-var contract-owner principal tx-sender)
 
 (define-constant err-owner-only (err u100))
@@ -102,6 +141,10 @@
 (define-constant err-inheritance-locked (err u108))
 (define-constant err-not-beneficiary (err u109))
 (define-constant err-inheritance-not-found (err u110))
+(define-constant err-analytics-not-found (err u111))
+(define-constant err-invalid-analytics-permission (err u112))
+(define-constant err-analytics-permission-expired (err u113))
+(define-constant err-invalid-metric-value (err u114))
 
 (define-read-only (get-last-token-id)
     (ok (var-get last-token-id))
@@ -222,6 +265,221 @@
             )
         )
         false
+    )
+)
+
+;; Health Analytics Read-Only Functions
+(define-read-only (get-analytics-record (analytics-id uint))
+    (map-get? health-analytics-records analytics-id)
+)
+
+(define-read-only (get-last-analytics-id)
+    (ok (var-get last-analytics-id))
+)
+
+(define-read-only (get-patient-analytics-summary (patient principal))
+    (map-get? patient-analytics-summary patient)
+)
+
+(define-read-only (get-analytics-permission
+        (patient principal)
+        (analyzer principal)
+    )
+    (map-get? analytics-permissions {
+        patient: patient,
+        analyzer: analyzer,
+    })
+)
+
+(define-read-only (has-valid-analytics-access
+        (patient principal)
+        (analyzer principal)
+    )
+    (let ((permission (map-get? analytics-permissions {
+            patient: patient,
+            analyzer: analyzer,
+        })))
+        (match permission
+            perm (and
+                (get is-active perm)
+                (match (get expires-at perm)
+                    expiry (< burn-block-height expiry)
+                    true
+                )
+            )
+            false
+        )
+    )
+)
+
+(define-read-only (calculate-patient-health-score (patient principal))
+    (let ((summary (map-get? patient-analytics-summary patient)))
+        (match summary
+            data (let (
+                    (total (get total-records data))
+                    (verified (get verified-records data))
+                    (consistency-score (if (> total u0)
+                        (* (/ verified total) u100)
+                        u0
+                    ))
+                    (raw-frequency (* (get avg-metric-count-per-month data) u10))
+                    (frequency-score (if (< raw-frequency u100) raw-frequency u100))
+                    (weighted-score (+ (* consistency-score u6) (* frequency-score u4)))
+                )
+                (ok (/ weighted-score u10)))
+            (ok u0)
+        )
+    )
+)
+
+;; Health Analytics Public Functions
+(define-public (record-health-metric
+        (metric-type (string-ascii 50))
+        (metric-value uint)
+        (unit (string-ascii 20))
+        (metadata (string-ascii 200))
+    )
+    (let (
+            (analytics-id (+ (var-get last-analytics-id) u1))
+            (current-summary (default-to
+                {
+                    total-records: u0,
+                    last-updated: u0,
+                    avg-metric-count-per-month: u0,
+                    verified-records: u0,
+                }
+                (map-get? patient-analytics-summary tx-sender)
+            ))
+        )
+        (asserts! (> metric-value u0) err-invalid-metric-value)
+        (map-set health-analytics-records analytics-id {
+            patient: tx-sender,
+            metric-type: metric-type,
+            metric-value: metric-value,
+            unit: unit,
+            recorded-at: burn-block-height,
+            is-verified: false,
+            provider: none,
+            metadata: metadata,
+        })
+        (map-set patient-analytics-summary tx-sender {
+            total-records: (+ (get total-records current-summary) u1),
+            last-updated: burn-block-height,
+            avg-metric-count-per-month: (get avg-metric-count-per-month current-summary),
+            verified-records: (get verified-records current-summary),
+        })
+        (var-set last-analytics-id analytics-id)
+        (ok analytics-id)
+    )
+)
+
+(define-public (verify-health-metric
+        (analytics-id uint)
+        (patient principal)
+    )
+    (let (
+            (analytics-record (unwrap! (map-get? health-analytics-records analytics-id)
+                err-analytics-not-found
+            ))
+            (current-summary (unwrap! (map-get? patient-analytics-summary patient)
+                err-analytics-not-found
+            ))
+        )
+        (asserts! (is-eq (get patient analytics-record) patient) err-unauthorized-access)
+        (asserts! (is-authorized-provider tx-sender) err-invalid-provider)
+        (asserts! (not (get is-verified analytics-record)) err-unauthorized-access)
+        (map-set health-analytics-records analytics-id
+            (merge analytics-record {
+                is-verified: true,
+                provider: (some tx-sender),
+            })
+        )
+        (map-set patient-analytics-summary patient
+            (merge current-summary {
+                verified-records: (+ (get verified-records current-summary) u1),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (grant-analytics-permission
+        (analyzer principal)
+        (permission-level (string-ascii 20))
+        (duration (optional uint))
+    )
+    (let ((expires-at (match duration
+            dur (some (+ burn-block-height dur))
+            none
+        )))
+        (map-set analytics-permissions {
+            patient: tx-sender,
+            analyzer: analyzer,
+        } {
+            granted-at: burn-block-height,
+            expires-at: expires-at,
+            permission-level: permission-level,
+            is-active: true,
+        })
+        (ok true)
+    )
+)
+
+(define-public (revoke-analytics-permission (analyzer principal))
+    (begin
+        (map-delete analytics-permissions {
+            patient: tx-sender,
+            analyzer: analyzer,
+        })
+        (ok true)
+    )
+)
+
+(define-public (access-patient-analytics-data
+        (patient principal)
+        (analytics-id uint)
+    )
+    (let (
+            (analytics-record (unwrap! (map-get? health-analytics-records analytics-id)
+                err-analytics-not-found
+            ))
+            (has-permission (or
+                (is-eq tx-sender patient)
+                (has-valid-analytics-access patient tx-sender)
+            ))
+        )
+        (asserts! (is-eq (get patient analytics-record) patient) err-unauthorized-access)
+        (asserts! has-permission err-invalid-analytics-permission)
+        (ok {
+            metric-type: (get metric-type analytics-record),
+            metric-value: (get metric-value analytics-record),
+            unit: (get unit analytics-record),
+            recorded-at: (get recorded-at analytics-record),
+            is-verified: (get is-verified analytics-record),
+            metadata: (get metadata analytics-record),
+        })
+    )
+)
+
+(define-public (update-analytics-summary-stats (patient principal))
+    (let (
+            (current-summary (unwrap! (map-get? patient-analytics-summary patient)
+                err-analytics-not-found
+            ))
+            (blocks-per-month u4320) ;; approximately 30 days * 144 blocks per day
+            (time-diff (- burn-block-height (get last-updated current-summary)))
+            (raw-months (/ time-diff blocks-per-month))
+            (months-active (if (> raw-months u1) raw-months u1))
+            (new-avg (/ (get total-records current-summary) months-active))
+        )
+        (asserts! (is-eq tx-sender patient) err-unauthorized-access)
+        (map-set patient-analytics-summary patient
+            (merge current-summary {
+                avg-metric-count-per-month: new-avg,
+                last-updated: burn-block-height,
+            })
+        )
+        (ok true)
     )
 )
 
