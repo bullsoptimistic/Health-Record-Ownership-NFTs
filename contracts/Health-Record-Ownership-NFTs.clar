@@ -323,10 +323,14 @@
                         u0
                     ))
                     (raw-frequency (* (get avg-metric-count-per-month data) u10))
-                    (frequency-score (if (< raw-frequency u100) raw-frequency u100))
+                    (frequency-score (if (< raw-frequency u100)
+                        raw-frequency
+                        u100
+                    ))
                     (weighted-score (+ (* consistency-score u6) (* frequency-score u4)))
                 )
-                (ok (/ weighted-score u10)))
+                (ok (/ weighted-score u10))
+            )
             (ok u0)
         )
     )
@@ -341,13 +345,12 @@
     )
     (let (
             (analytics-id (+ (var-get last-analytics-id) u1))
-            (current-summary (default-to
-                {
-                    total-records: u0,
-                    last-updated: u0,
-                    avg-metric-count-per-month: u0,
-                    verified-records: u0,
-                }
+            (current-summary (default-to {
+                total-records: u0,
+                last-updated: u0,
+                avg-metric-count-per-month: u0,
+                verified-records: u0,
+            }
                 (map-get? patient-analytics-summary tx-sender)
             ))
         )
@@ -385,9 +388,13 @@
                 err-analytics-not-found
             ))
         )
-        (asserts! (is-eq (get patient analytics-record) patient) err-unauthorized-access)
+        (asserts! (is-eq (get patient analytics-record) patient)
+            err-unauthorized-access
+        )
         (asserts! (is-authorized-provider tx-sender) err-invalid-provider)
-        (asserts! (not (get is-verified analytics-record)) err-unauthorized-access)
+        (asserts! (not (get is-verified analytics-record))
+            err-unauthorized-access
+        )
         (map-set health-analytics-records analytics-id
             (merge analytics-record {
                 is-verified: true,
@@ -395,9 +402,7 @@
             })
         )
         (map-set patient-analytics-summary patient
-            (merge current-summary {
-                verified-records: (+ (get verified-records current-summary) u1),
-            })
+            (merge current-summary { verified-records: (+ (get verified-records current-summary) u1) })
         )
         (ok true)
     )
@@ -448,7 +453,9 @@
                 (has-valid-analytics-access patient tx-sender)
             ))
         )
-        (asserts! (is-eq (get patient analytics-record) patient) err-unauthorized-access)
+        (asserts! (is-eq (get patient analytics-record) patient)
+            err-unauthorized-access
+        )
         (asserts! has-permission err-invalid-analytics-permission)
         (ok {
             metric-type: (get metric-type analytics-record),
@@ -469,7 +476,10 @@
             (blocks-per-month u4320) ;; approximately 30 days * 144 blocks per day
             (time-diff (- burn-block-height (get last-updated current-summary)))
             (raw-months (/ time-diff blocks-per-month))
-            (months-active (if (> raw-months u1) raw-months u1))
+            (months-active (if (> raw-months u1)
+                raw-months
+                u1
+            ))
             (new-avg (/ (get total-records current-summary) months-active))
         )
         (asserts! (is-eq tx-sender patient) err-unauthorized-access)
@@ -785,4 +795,30 @@
         (log-audit-event (get token-id plan) "inheritance-cancel" none true)
         (ok true)
     )
+)
+
+(define-constant DX-NAME "Health-Record-Ownership-NFTs")
+(define-constant DX-VERSION "devtools-001")
+
+(define-read-only (dx-get-metadata)
+    (ok {
+        name: DX-NAME,
+        version: DX-VERSION,
+    })
+)
+
+(define-read-only (dx-get-contract-principal)
+    (ok (as-contract tx-sender))
+)
+
+(define-read-only (dx-get-block-height)
+    (ok burn-block-height)
+)
+
+(define-read-only (dx-ping)
+    (ok true)
+)
+
+(define-read-only (dx-echo (input (string-ascii 200)))
+    (ok input)
 )
